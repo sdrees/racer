@@ -6,8 +6,8 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use core::SearchType::{self, ExactMatch, StartsWith};
-use core::{BytePos, ByteRange, Location, LocationExt, RawSource, Session, SessionExt};
+use crate::core::SearchType::{self, ExactMatch, StartsWith};
+use crate::core::{BytePos, ByteRange, Location, LocationExt, RawSource, Session, SessionExt};
 
 #[cfg(unix)]
 pub const PATH_SEP: char = ':';
@@ -37,39 +37,35 @@ pub(crate) fn is_whitespace_byte(b: u8) -> bool {
 /// Searches for `needle` as a standalone identifier in `haystack`. To be considered a match,
 /// the `needle` must occur either at the beginning of `haystack` or after a non-identifier
 /// character.
-// TODO: this function should returns the position of found keyword
 pub fn txt_matches(stype: SearchType, needle: &str, haystack: &str) -> bool {
+    txt_matches_with_pos(stype, needle, haystack).is_some()
+}
+
+pub fn txt_matches_with_pos(stype: SearchType, needle: &str, haystack: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
     match stype {
         ExactMatch => {
             let n_len = needle.len();
             let h_len = haystack.len();
-
-            if n_len == 0 {
-                return true;
-            }
-
             for (n, _) in haystack.match_indices(needle) {
                 if (n == 0 || !is_ident_char(char_before(haystack, n)))
                     && (n + n_len == h_len || !is_ident_char(char_at(haystack, n + n_len)))
                 {
-                    return true;
+                    return Some(n);
                 }
             }
-            false
         }
         StartsWith => {
-            if needle.is_empty() {
-                return true;
-            }
-
             for (n, _) in haystack.match_indices(needle) {
                 if n == 0 || !is_ident_char(char_before(haystack, n)) {
-                    return true;
+                    return Some(n);
                 }
             }
-            false
         }
     }
+    None
 }
 
 pub fn symbol_matches(stype: SearchType, searchstr: &str, candidate: &str) -> bool {
@@ -284,14 +280,14 @@ fn txt_matches_matches_methods() {
 /// let path = "lib.rs";
 ///
 /// let cache = racer::FileCache::default();
-/// let session = racer::Session::new(&cache);
+/// let session = racer::Session::new(&cache, None);
 ///
 /// session.cache_file_contents(path, src);
 ///
 /// let expanded = racer::expand_ident(path, pos, &session).unwrap();
 /// assert_eq!("this_is_an_identifier", expanded.ident());
 /// ```
-pub fn expand_ident<P, C>(filepath: P, cursor: C, session: &Session) -> Option<ExpandedIdent>
+pub fn expand_ident<P, C>(filepath: P, cursor: C, session: &Session<'_>) -> Option<ExpandedIdent>
 where
     P: AsRef<path::Path>,
     C: Into<Location>,
@@ -414,22 +410,10 @@ pub enum RustSrcPathError {
     NotRustSourceTree(path::PathBuf),
 }
 
-impl error::Error for RustSrcPathError {
-    fn cause(&self) -> Option<&error::Error> {
-        None
-    }
-
-    fn description(&self) -> &str {
-        match *self {
-            RustSrcPathError::Missing => "RUSTC_SRC_PATH not set or not found in sysroot",
-            RustSrcPathError::DoesNotExist(_) => "RUSTC_SRC_PATH does not exist on file system",
-            RustSrcPathError::NotRustSourceTree(_) => "RUSTC_SRC_PATH isn't a rustc source tree",
-        }
-    }
-}
+impl error::Error for RustSrcPathError {}
 
 impl fmt::Display for RustSrcPathError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             RustSrcPathError::Missing => write!(
                 f,
@@ -677,9 +661,9 @@ fn test_get_rust_src_path_rustup_ok() {
 /// An immutable stack implemented as a linked list backed by a thread's stack.
 // TODO: this implementation is fast, but if we want to run racer in multiple threads,
 // we have to rewrite it using std::sync::Arc.
-pub struct StackLinkedListNode<'stack, T: 'stack>(Option<StackLinkedListNodeData<'stack, T>>);
+pub struct StackLinkedListNode<'stack, T>(Option<StackLinkedListNodeData<'stack, T>>);
 
-struct StackLinkedListNodeData<'stack, T: 'stack> {
+struct StackLinkedListNodeData<'stack, T> {
     item: T,
     previous: &'stack StackLinkedListNode<'stack, T>,
 }
@@ -858,5 +842,5 @@ pub(crate) fn gen_tuple_fields(u: usize) -> impl Iterator<Item = &'static str> {
     const NUM: [&'static str; 16] = [
         "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
     ];
-    NUM.into_iter().take(::std::cmp::min(u, 16)).map(|x| *x)
+    NUM.iter().take(::std::cmp::min(u, 16)).map(|x| *x)
 }

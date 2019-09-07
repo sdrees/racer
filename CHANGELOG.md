@@ -4,6 +4,16 @@ Change Log
 All notable changes to this project will be documented in this file. This
 project adheres to [Semantic Versioning](http://semver.org/).
 
+# 2.1.26
+- Update the version of rustc-ap-syntax
+
+# 2.1.25
+- Update the version of rustc-ap-syntax
+
+# 2.1.24
+- Rust 2018 (#1051)
+- Update the version of rustc-ap-syntax
+
 # 2.1.22
 - Fix completion for `super::super::...`(#1053)
 

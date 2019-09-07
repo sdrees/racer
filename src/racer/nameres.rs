@@ -4,21 +4,23 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{self, vec};
 
-use primitive::PrimKind;
+use crate::primitive::PrimKind;
 use syntax::ast::BinOpKind;
 
-use ast_types::{ImplHeader, Path as RacerPath, PathPrefix, PathSegment, Ty};
-use core::Namespace;
-use core::SearchType::{self, ExactMatch, StartsWith};
-use core::{BytePos, ByteRange, Coordinate, Match, MatchType, Scope, Session, SessionExt, Src};
-use fileres::{get_crate_file, get_module_file, get_std_file, search_crate_names};
-use matchers::{find_doc, ImportInfo, MatchCxt};
-use primitive;
-use util::{
+use crate::ast_types::{ImplHeader, Path as RacerPath, PathPrefix, PathSegment, Ty};
+use crate::core::Namespace;
+use crate::core::SearchType::{self, ExactMatch, StartsWith};
+use crate::core::{
+    BytePos, ByteRange, Coordinate, Match, MatchType, Scope, Session, SessionExt, Src,
+};
+use crate::fileres::{get_crate_file, get_module_file, get_std_file, search_crate_names};
+use crate::matchers::{find_doc, ImportInfo, MatchCxt};
+use crate::primitive;
+use crate::util::{
     self, calculate_str_hash, find_ident_end, get_rust_src_path, strip_words, symbol_matches,
     trim_visibility, txt_matches,
 };
-use {ast, core, matchers, scopes, typeinf};
+use crate::{ast, core, matchers, scopes, typeinf};
 
 lazy_static! {
     pub static ref RUST_SRC_PATH: Option<PathBuf> = get_rust_src_path().ok();
@@ -28,7 +30,7 @@ pub(crate) fn search_struct_fields(
     searchstr: &str,
     structmatch: &Match,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     match structmatch.mtype {
         MatchType::Struct(_) | MatchType::EnumVariant(_) => {}
@@ -74,7 +76,7 @@ pub fn search_for_impl_methods(
     fpath: &Path,
     local: bool,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     let implsearchstr: &str = &match_request.matchstr;
 
@@ -155,13 +157,13 @@ pub fn search_for_impl_methods(
 
 fn search_scope_for_methods(
     point: BytePos,
-    src: Src,
+    src: Src<'_>,
     searchstr: &str,
     filepath: &Path,
     includes_assoc_fn: bool,
     includes_assoc_ty_and_const: bool,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     debug!(
         "searching scope for methods {:?} |{}| {:?}",
@@ -217,7 +219,7 @@ fn search_scope_for_methods(
 
 fn search_generic_impl_scope_for_methods(
     point: BytePos,
-    src: Src,
+    src: Src<'_>,
     searchstr: &str,
     impl_header: &Rc<ImplHeader>,
     search_type: SearchType,
@@ -264,7 +266,7 @@ fn search_scope_for_impled_assoc_types(
     header: &ImplHeader,
     searchstr: &str,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<(String, Ty)> {
     let src = session.load_source_file(header.file_path());
     let scope_src = src.as_src().shift_start(header.scope_start());
@@ -312,7 +314,7 @@ fn search_for_impls(
     searchstr: &str,
     filepath: &Path,
     local: bool,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<ImplHeader> {
     debug!(
         "search_for_impls {:?}, {}, {:?}",
@@ -361,7 +363,7 @@ pub(crate) fn search_trait_impls(
     once: bool,
     filepath: &Path,
     local: bool,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<ImplHeader> {
     debug!(
         "search_trait_impls {:?}, {}, {:?}, {:?}",
@@ -417,7 +419,7 @@ pub(crate) fn search_trait_impls(
 
 fn cached_generic_impls(
     filepath: &Path,
-    session: &Session,
+    session: &Session<'_>,
     scope_start: BytePos,
 ) -> Vec<Rc<ImplHeader>> {
     // the cache is keyed by path and the scope we search in
@@ -446,7 +448,7 @@ fn search_for_generic_impls(
     pos: BytePos,
     searchstr: &str,
     filepath: &Path,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Rc<ImplHeader>> {
     debug!(
         "search_for_generic_impls {:?}, {}, {:?}",
@@ -481,7 +483,7 @@ fn search_for_generic_impls(
 fn search_scope_headers(
     point: BytePos,
     scopestart: BytePos,
-    msrc: Src,
+    msrc: Src<'_>,
     search_str: &str,
     filepath: &Path,
     search_type: SearchType,
@@ -757,8 +759,9 @@ fn search_fn_args_and_generics(
 #[test]
 fn test_do_file_search_std() {
     let cache = core::FileCache::default();
-    let session = Session::new(&cache);
-    let matches = do_file_search("std", &Path::new("."), &session);
+    let path = Path::new(".");
+    let session = Session::new(&cache, Some(path));
+    let matches = do_file_search("std", path, &session);
     assert!(matches
         .into_iter()
         .any(|m| m.filepath.ends_with("src/libstd/lib.rs")));
@@ -767,14 +770,15 @@ fn test_do_file_search_std() {
 #[test]
 fn test_do_file_search_local() {
     let cache = core::FileCache::default();
-    let session = Session::new(&cache);
-    let matches = do_file_search("submodule", &Path::new("fixtures/arst/src"), &session);
+    let path = Path::new("fixtures/arst/src");
+    let session = Session::new(&cache, Some(path));
+    let matches = do_file_search("submodule", path, &session);
     assert!(matches
         .into_iter()
         .any(|m| m.filepath.ends_with("fixtures/arst/src/submodule/mod.rs")));
 }
 
-pub fn do_file_search(searchstr: &str, currentdir: &Path, session: &Session) -> Vec<Match> {
+pub fn do_file_search(searchstr: &str, currentdir: &Path, session: &Session<'_>) -> Vec<Match> {
     debug!("do_file_search with search string \"{}\"", searchstr);
     let mut out = Vec::new();
 
@@ -861,8 +865,8 @@ pub fn search_crate_root(
     modfpath: &Path,
     searchtype: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
     // Skip current file or not
     // If we aren't searching paths with global prefix, should do so
     skip_modfpath: bool,
@@ -903,7 +907,7 @@ pub fn search_crate_root(
     out
 }
 
-pub fn find_possible_crate_root_modules(currentdir: &Path, session: &Session) -> Vec<PathBuf> {
+pub fn find_possible_crate_root_modules(currentdir: &Path, session: &Session<'_>) -> Vec<PathBuf> {
     let mut res = Vec::new();
 
     for root in &["lib.rs", "main.rs"] {
@@ -930,8 +934,8 @@ pub fn search_next_scope(
     search_type: SearchType,
     local: bool,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let filesrc = session.load_source_file(filepath);
     if startpoint != BytePos::ZERO {
@@ -960,14 +964,14 @@ pub fn search_next_scope(
 pub fn search_scope(
     start: BytePos,
     complete_point: Option<BytePos>,
-    src: Src,
+    src: Src<'_>,
     pathseg: &PathSegment,
     filepath: &Path,
     search_type: SearchType,
     is_local: bool,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let search_str = &pathseg.name;
     let mut out = Vec::new();
@@ -1216,11 +1220,11 @@ fn search_closure_args(
 }
 
 fn run_matchers_on_blob(
-    src: Src,
-    context: &MatchCxt,
+    src: Src<'_>,
+    context: &MatchCxt<'_, '_>,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     debug!(
         "[run_matchers_on_blob] cxt: {:?}, namespace: {:?}",
@@ -1271,12 +1275,12 @@ fn run_matchers_on_blob(
 fn search_local_scopes(
     pathseg: &PathSegment,
     filepath: &Path,
-    msrc: Src,
+    msrc: Src<'_>,
     point: BytePos,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     debug!(
         "search_local_scopes {:?} {:?} {:?} {:?} {:?}",
@@ -1346,8 +1350,8 @@ pub fn search_prelude_file(
     pathseg: &PathSegment,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     debug!(
         "search_prelude file {:?} {:?} {:?}",
@@ -1386,7 +1390,7 @@ pub fn resolve_path_with_primitive(
     pos: BytePos,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     debug!("resolve_path_with_primitive {:?}", path);
 
@@ -1434,8 +1438,8 @@ pub fn resolve_name(
     pos: BytePos,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let mut out = Vec::new();
     let searchstr = &pathseg.name;
@@ -1549,8 +1553,8 @@ pub fn resolve_name(
 pub fn get_super_scope(
     filepath: &Path,
     pos: BytePos,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Option<core::Scope> {
     let msrc = session.load_source_file(filepath);
     let mut path = scopes::get_local_module_path(msrc.as_src(), pos);
@@ -1610,7 +1614,7 @@ fn get_enum_variants(
     search_path: &PathSegment,
     search_type: SearchType,
     context: &Match,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     let mut out = Vec::new();
     debug!("context: {:?}", context);
@@ -1649,8 +1653,8 @@ fn search_impl_scope(
     path: &PathSegment,
     search_type: SearchType,
     header: &ImplHeader,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let src = session.load_source_file(header.file_path());
     let search_str = &path.name;
@@ -1679,8 +1683,8 @@ fn get_impled_items(
     search_path: &PathSegment,
     search_type: SearchType,
     context: &Match,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let mut out = get_enum_variants(search_path, search_type, context, session);
     for header in search_for_impls(
@@ -1734,8 +1738,8 @@ pub fn resolve_path(
     pos: BytePos,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     debug!(
         "resolve_path {:?} {:?} {:?} {:?}",
@@ -1837,8 +1841,8 @@ fn resolve_global_path(
     filepath: &Path,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Option<Vec<Match>> {
     let mut segs = path.segments.iter().enumerate();
     let first_stype = if path.segments.len() == 1 {
@@ -1873,8 +1877,8 @@ fn resolve_following_path(
     following_seg: &PathSegment,
     namespace: Namespace,
     search_type: SearchType,
-    import_info: &ImportInfo,
-    session: &Session,
+    import_info: &ImportInfo<'_, '_>,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     match followed_match.mtype {
         MatchType::Module | MatchType::Crate => {
@@ -1947,12 +1951,12 @@ fn resolve_following_path(
 
 pub fn resolve_method(
     point: BytePos,
-    msrc: Src,
+    msrc: Src<'_>,
     searchstr: &str,
     filepath: &Path,
     search_type: SearchType,
-    session: &Session,
-    import_info: &ImportInfo,
+    session: &Session<'_>,
+    import_info: &ImportInfo<'_, '_>,
 ) -> Vec<Match> {
     let scopestart = scopes::scope_start(msrc, point);
     debug!(
@@ -2030,7 +2034,7 @@ pub fn do_external_search(
     pos: BytePos,
     search_type: SearchType,
     namespace: Namespace,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     debug!(
         "do_external_search path {:?} {:?}",
@@ -2137,7 +2141,7 @@ pub fn do_external_search(
 }
 
 /// collect inherited traits by Depth First Search
-fn collect_inherited_traits(trait_match: Match, s: &Session) -> Vec<Match> {
+fn collect_inherited_traits(trait_match: Match, s: &Session<'_>) -> Vec<Match> {
     // search node
     struct Node {
         target_str: String,
@@ -2186,7 +2190,7 @@ pub fn search_for_fields_and_methods(
     searchstr: &str,
     search_type: SearchType,
     only_methods: bool,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     let m = context;
     let mut out = Vec::new();
@@ -2310,7 +2314,7 @@ fn search_for_deref_matches(
     type_match: &Match, // the type which implements Deref
     impl_header: &ImplHeader,
     fieldsearchstr: &str,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     match target_ty {
         Ty::PathSearch(ref paths) => {
@@ -2329,7 +2333,7 @@ pub(crate) fn get_field_matches_from_ty(
     ty: Ty,
     searchstr: &str,
     stype: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     match ty {
         Ty::Match(m) => search_for_fields_and_methods(m, searchstr, stype, false, session),
@@ -2374,7 +2378,7 @@ fn get_assoc_type_from_header(
     target_path: &RacerPath, // type target = ~
     type_match: &Match,      // the type which implements trait
     impl_header: &ImplHeader,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Option<Ty> {
     debug!(
         "[search_for_deref_matches] target: {:?} impl: {:?}",
@@ -2403,7 +2407,7 @@ fn get_assoc_type_from_header(
 fn get_std_macros(
     searchstr: &str,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
     out: &mut Vec<Match>,
 ) {
     let std_path = if let Some(ref p) = *RUST_SRC_PATH {
@@ -2442,7 +2446,7 @@ fn get_std_macros_(
     searchstr: &str,
     is_core: bool,
     search_type: SearchType,
-    session: &Session,
+    session: &Session<'_>,
     out: &mut Vec<Match>,
 ) {
     let raw_src = session.load_raw_file(&macro_path);
@@ -2518,7 +2522,7 @@ fn get_std_macros_(
     }
 }
 
-pub(crate) fn get_iter_item(selfm: &Match, session: &Session) -> Option<Ty> {
+pub(crate) fn get_iter_item(selfm: &Match, session: &Session<'_>) -> Option<Ty> {
     let iter_header = search_trait_impls(
         selfm.point,
         &selfm.matchstr,
@@ -2550,7 +2554,7 @@ pub(crate) fn get_tuple_field_matches<'a, 'b: 'a>(
     fields: usize,
     search_str: &'a str,
     search_type: SearchType,
-    session: &'b Session,
+    session: &'b Session<'_>,
 ) -> impl 'a + Iterator<Item = Match> {
     util::gen_tuple_fields(fields).filter_map(move |field| {
         if txt_matches(search_type, search_str, field) {
@@ -2567,7 +2571,7 @@ pub(crate) fn get_tuple_field_matches<'a, 'b: 'a>(
     })
 }
 
-pub(crate) fn get_index_output(selfm: &Match, session: &Session) -> Option<Ty> {
+pub(crate) fn get_index_output(selfm: &Match, session: &Session<'_>) -> Option<Ty> {
     // short cut
     if selfm.matchstr == "Vec" {
         return selfm.resolved_generics().next().map(|ty| ty.to_owned());
@@ -2590,7 +2594,7 @@ pub(crate) fn get_associated_type_match(
     impl_header: &ImplHeader,
     type_name: &str,
     context: &Match,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Option<Ty> {
     let output = search_scope_for_impled_assoc_types(
         impl_header,
@@ -2615,7 +2619,7 @@ pub(crate) fn get_struct_fields(
     filepath: &Path,
     complete_pos: BytePos,
     stype: SearchType,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Vec<Match> {
     resolve_path(
         &path,
@@ -2678,7 +2682,7 @@ pub(crate) fn resolve_binary_expr_type(
     base_type: &Match,
     node: BinOpKind,
     other_type: Option<&str>,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Option<Ty> {
     let trait_name = typeinf::get_operator_trait(node);
     if trait_name == "bool" {

@@ -1,8 +1,8 @@
-use ast_types::{GenericsArgs, ImplHeader, Pat, TraitBounds, Ty, TypeParameter};
-use codecleaner;
-use codeiter::StmtIndicesIter;
-use matchers::ImportInfo;
-use project_model::ProjectModelProvider;
+use crate::ast_types::{GenericsArgs, ImplHeader, Pat, TraitBounds, Ty, TypeParameter};
+use crate::codecleaner;
+use crate::codeiter::StmtIndicesIter;
+use crate::matchers::ImportInfo;
+use crate::project_model::ProjectModelProvider;
 use rls_span;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -17,12 +17,12 @@ use std::{fmt, vec};
 use std::{path, str};
 use syntax::source_map;
 
-use ast;
-use fileres;
-use nameres;
-use primitive::PrimKind;
-use scopes;
-use util;
+use crate::ast;
+use crate::fileres;
+use crate::nameres;
+use crate::primitive::PrimKind;
+use crate::scopes;
+use crate::util;
 
 /// Within a [`Match`], specifies what was matched
 ///
@@ -78,7 +78,7 @@ impl MatchType {
 }
 
 impl fmt::Display for MatchType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MatchType::Struct(_) => write!(f, "Struct"),
             MatchType::Method(_) => write!(f, "Method"),
@@ -188,7 +188,7 @@ impl BytePos {
 }
 
 impl fmt::Display for BytePos {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -273,7 +273,7 @@ impl From<source_map::Span> for ByteRange {
 }
 
 impl fmt::Debug for ByteRange {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ByteRange({}..{})", self.start.0, self.end.0)
     }
 }
@@ -424,7 +424,7 @@ impl LocationExt for Location {
 }
 
 impl fmt::Debug for Match {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "Match [{:?}, {:?}, {:?}, {:?}, {:?}, |{}|]",
@@ -461,7 +461,7 @@ impl Scope {
 }
 
 impl fmt::Debug for Scope {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Scope [{:?}, {:?}]", self.filepath.display(), self.point)
     }
 }
@@ -540,11 +540,11 @@ impl MaskedSource {
         MaskedSource { code }
     }
 
-    pub fn as_src(&self) -> Src {
+    pub fn as_src(&self) -> Src<'_> {
         self.get_src_from_start(BytePos::ZERO)
     }
 
-    pub fn get_src_from_start(&self, new_start: BytePos) -> Src {
+    pub fn get_src_from_start(&self, new_start: BytePos) -> Src<'_> {
         Src {
             src: self,
             range: ByteRange::new(new_start, self.len().into()),
@@ -638,7 +638,7 @@ fn myfn(b:usize) {
 }
 
 impl<'c> Src<'c> {
-    pub fn iter_stmts(&self) -> Fuse<StmtIndicesIter> {
+    pub fn iter_stmts(&self) -> Fuse<StmtIndicesIter<'_>> {
         StmtIndicesIter::from_parts(self)
     }
 
@@ -712,7 +712,7 @@ pub struct FileCache {
     masked_map: RefCell<HashMap<path::PathBuf, Rc<MaskedSource>>>,
 
     /// The file loader
-    pub(crate) loader: Box<FileLoader>,
+    pub(crate) loader: Box<dyn FileLoader>,
 }
 
 /// Used by the FileCache for loading files
@@ -838,15 +838,15 @@ pub trait SessionExt {
     /// Request that a file is loaded into the cache
     ///
     /// This API is unstable and should not be used outside of Racer
-    fn load_raw_file(&self, &path::Path) -> Rc<RawSource>;
+    fn load_raw_file(&self, _: &path::Path) -> Rc<RawSource>;
 
     /// ranged version of load_raw_file
-    fn load_raw_src_ranged(&self, src: &Src, &path::Path) -> RangedRawSrc;
+    fn load_raw_src_ranged(&self, src: &Src<'_>, _: &path::Path) -> RangedRawSrc;
 
     /// Request that a file is loaded into the cache with comments masked
     ///
     /// This API is unstable and should not be used outside of Racer
-    fn load_source_file(&self, &path::Path) -> Rc<MaskedSource>;
+    fn load_source_file(&self, _: &path::Path) -> Rc<MaskedSource>;
 }
 
 /// Context for a Racer operation
@@ -858,11 +858,11 @@ pub struct Session<'c> {
     cache: &'c FileCache,
     /// Cache for generic impls
     pub generic_impls: RefCell<HashMap<(path::PathBuf, BytePos), Vec<Rc<ImplHeader>>>>,
-    pub project_model: Box<ProjectModelProvider + 'c>,
+    pub project_model: Box<dyn ProjectModelProvider + 'c>,
 }
 
 impl<'c> fmt::Debug for Session<'c> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Session {{ .. }}")
     }
 }
@@ -879,19 +879,19 @@ impl<'c> Session<'c> {
     /// extern crate racer;
     ///
     /// let cache = racer::FileCache::default();
-    /// let session = racer::Session::new(&cache);
+    /// let session = racer::Session::new(&cache, None);
     /// ```
     ///
     /// [`FileCache`]: struct.FileCache.html
     #[cfg(feature = "metadata")]
-    pub fn new(cache: &'c FileCache) -> Session<'c> {
-        let project_model = ::metadata::project_model();
+    pub fn new(cache: &'c FileCache, project_path: Option<&path::Path>) -> Session<'c> {
+        let project_model = crate::metadata::project_model(project_path);
         Session::with_project_model(cache, project_model)
     }
 
     pub fn with_project_model(
         cache: &'c FileCache,
-        project_model: Box<ProjectModelProvider + 'c>,
+        project_model: Box<dyn ProjectModelProvider + 'c>,
     ) -> Session<'c> {
         Session {
             cache,
@@ -909,7 +909,7 @@ impl<'c> Session<'c> {
     /// extern crate racer;
     ///
     /// let cache = racer::FileCache::default();
-    /// let session = racer::Session::new(&cache);
+    /// let session = racer::Session::new(&cache, None);
     ///
     /// session.cache_file_contents("foo.rs", "pub struct Foo;\\n");
     /// ```
@@ -934,7 +934,7 @@ impl<'c> SessionExt for Session<'c> {
         self.cache.load_file(filepath)
     }
 
-    fn load_raw_src_ranged(&self, src: &Src, filepath: &path::Path) -> RangedRawSrc {
+    fn load_raw_src_ranged(&self, src: &Src<'_>, filepath: &path::Path) -> RangedRawSrc {
         let inner = self.cache.load_file(filepath);
         RangedRawSrc {
             inner,
@@ -948,7 +948,7 @@ impl<'c> SessionExt for Session<'c> {
 }
 
 /// Get the racer point of a line/character number pair for a file.
-pub fn to_point<P>(coords: Coordinate, path: P, session: &Session) -> Option<BytePos>
+pub fn to_point<P>(coords: Coordinate, path: P, session: &Session<'_>) -> Option<BytePos>
 where
     P: AsRef<path::Path>,
 {
@@ -956,7 +956,7 @@ where
 }
 
 /// Get the racer point of a line/character number pair for a file.
-pub fn to_coords<P>(point: BytePos, path: P, session: &Session) -> Option<Coordinate>
+pub fn to_coords<P>(point: BytePos, path: P, session: &Session<'_>) -> Option<Coordinate>
 where
     P: AsRef<path::Path>,
 {
@@ -976,7 +976,7 @@ where
 ///
 /// let path = std::path::Path::new(".");
 /// let cache = racer::FileCache::default();
-/// let session = racer::Session::new(&cache);
+/// let session = racer::Session::new(&cache, Some(path));
 ///
 /// let m = racer::complete_fully_qualified_name(
 ///     "std::fs::canon",
@@ -991,7 +991,7 @@ where
 pub fn complete_fully_qualified_name<'c, S, P>(
     query: S,
     path: P,
-    session: &'c Session,
+    session: &'c Session<'_>,
 ) -> MatchIter<'c>
 where
     S: AsRef<str>,
@@ -1007,7 +1007,11 @@ where
 }
 
 /// Actual implementation without generic bounds
-fn complete_fully_qualified_name_(query: &str, path: &path::Path, session: &Session) -> Vec<Match> {
+fn complete_fully_qualified_name_(
+    query: &str,
+    path: &path::Path,
+    session: &Session<'_>,
+) -> Vec<Match> {
     let p: Vec<&str> = query.split("::").collect();
 
     let mut matches = Vec::new();
@@ -1058,7 +1062,7 @@ fn complete_fully_qualified_name_(query: &str, path: &path::Path, session: &Sess
 /// println!("{:?}", src);
 ///
 /// let cache = racer::FileCache::default();
-/// let session = racer::Session::new(&cache);
+/// let session = racer::Session::new(&cache, None);
 ///
 /// session.cache_file_contents("lib.rs", src);
 ///
@@ -1069,7 +1073,11 @@ fn complete_fully_qualified_name_(query: &str, path: &path::Path, session: &Sess
 ///
 /// # }
 /// ```
-pub fn complete_from_file<'c, P, C>(filepath: P, cursor: C, session: &'c Session) -> MatchIter<'c>
+pub fn complete_from_file<'c, P, C>(
+    filepath: P,
+    cursor: C,
+    session: &'c Session<'_>,
+) -> MatchIter<'c>
 where
     P: AsRef<path::Path>,
     C: Into<Location>,
@@ -1084,7 +1092,11 @@ where
     }
 }
 
-fn complete_from_file_(filepath: &path::Path, cursor: Location, session: &Session) -> Vec<Match> {
+fn complete_from_file_(
+    filepath: &path::Path,
+    cursor: Location,
+    session: &Session<'_>,
+) -> Vec<Match> {
     let src = session.load_source_file(filepath);
     let raw_src = session.load_raw_file(filepath);
     let src_text = &src.as_src()[..];
@@ -1190,7 +1202,7 @@ fn complete_from_file_(filepath: &path::Path, cursor: Location, session: &Sessio
 /// # fn main() {
 /// let _ = env_logger::init();
 /// let cache = racer::FileCache::default();
-/// let session = racer::Session::new(&cache);
+/// let session = racer::Session::new(&cache, None);
 ///
 /// // This is the file where we request completion from
 /// let src = stringify! {
@@ -1209,7 +1221,7 @@ fn complete_from_file_(filepath: &path::Path, cursor: Location, session: &Sessio
 /// assert_eq!(racer::is_use_stmt("lib.rs", racer::Location::from(5000), &session), false);
 /// # }
 /// ```
-pub fn is_use_stmt<P, C>(file_path: P, cursor: C, session: &Session) -> bool
+pub fn is_use_stmt<P, C>(file_path: P, cursor: C, session: &Session<'_>) -> bool
 where
     P: AsRef<path::Path>,
     C: Into<Location>,
@@ -1243,30 +1255,27 @@ where
 /// # fn main() {
 /// let _ = env_logger::init();
 /// let cache = racer::FileCache::default();
-/// let session = racer::Session::new(&cache);
+/// let session = racer::Session::new(&cache, None);
 ///
 /// // This is the file where we request completion from
-/// let src = stringify! {
+/// let src = r"
 ///    mod sub;
 ///    use sub::foo;
 ///    fn main() {
 ///        foo();
 ///    };
-/// };
+/// ";
 ///
 /// // This is the submodule where the definition is found
-/// let sub = stringify! {
-///     pub fn foo() {}
-/// };
+/// let sub = r"pub fn foo() {}";
 ///
 /// // Load files into cache to prevent trying to read from disk
 /// session.cache_file_contents("sub.rs", sub);
 /// session.cache_file_contents("lib.rs", src);
 ///
-/// // Search for the definition. 45 is the byte offset
-/// // in `src` after stringify! runs. Specifically, this asks
-/// // for the definition of `foo()`.
-/// let m = racer::find_definition("lib.rs", racer::Location::from(45), &session)
+/// // Search for the definition. 52 is the byte offset in `src`.
+/// // Specifically, this asks for the definition of `foo()`.
+/// let m = racer::find_definition("lib.rs", racer::Location::from(52), &session)
 ///               .expect("find definition returns a match");
 ///
 /// // Should have found definition in the "sub.rs" file
@@ -1277,7 +1286,7 @@ where
 /// assert_eq!(m.mtype, racer::MatchType::Function);
 /// # }
 /// ```
-pub fn find_definition<P, C>(filepath: P, cursor: C, session: &Session) -> Option<Match>
+pub fn find_definition<P, C>(filepath: P, cursor: C, session: &Session<'_>) -> Option<Match>
 where
     P: AsRef<path::Path>,
     C: Into<Location>,
@@ -1295,7 +1304,7 @@ where
 pub fn find_definition_(
     filepath: &path::Path,
     cursor: Location,
-    session: &Session,
+    session: &Session<'_>,
 ) -> Option<Match> {
     let src = session.load_source_file(filepath);
     let src_txt = &src[..];
@@ -1387,7 +1396,7 @@ mod tests {
         // the newly cached contents.
         macro_rules! cache_and_assert {
             ($src: ident) => {{
-                let session = Session::new(&cache);
+                let session = Session::new(&cache, Some(path));
                 session.cache_file_contents(path, $src);
                 assert_eq!($src, &session.load_raw_file(path)[..]);
                 assert_eq!($src, &session.load_source_file(path).code[..]);

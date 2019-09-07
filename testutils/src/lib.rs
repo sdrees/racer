@@ -1,6 +1,6 @@
 //! system test utilities for racer
-extern crate racer;
-extern crate tempfile;
+use racer;
+
 use racer::{complete_from_file, find_definition as racer_find_definition, BytePos, Match};
 use std::fmt;
 use std::fs;
@@ -52,7 +52,7 @@ impl TmpFile {
 }
 
 impl fmt::Debug for TmpFile {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TmpFile: {:?}", self.path())
     }
 }
@@ -127,7 +127,7 @@ impl AsRef<Path> for TmpDir {
 }
 
 impl fmt::Debug for TmpDir {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TmpDir: {:?}", self.path())
     }
 }
@@ -192,7 +192,7 @@ pub fn get_all_completions_with_name(src: &str, dir: Option<TmpDir>, fname: &str
     let (completion_point, clean_src) = get_pos_and_source(src);
     let path = dir.write_file(fname, &clean_src);
     let cache = racer::FileCache::default();
-    let session = racer::Session::new(&cache);
+    let session = racer::Session::new(&cache, Some(path.as_ref()));
     complete_from_file(&path, completion_point, &session).collect()
 }
 
@@ -233,6 +233,6 @@ pub fn find_definition_with_name(src: &str, dir: Option<TmpDir>, fname: &str) ->
     let (completion_point, clean_src) = get_pos_and_source(src);
     let path = dir.write_file(fname, &clean_src);
     let cache = racer::FileCache::default();
-    let session = racer::Session::new(&cache);
+    let session = racer::Session::new(&cache, Some(path.as_ref()));
     racer_find_definition(&path, completion_point, &session)
 }

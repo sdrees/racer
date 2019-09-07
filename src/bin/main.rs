@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate log;
-extern crate env_logger;
+use env_logger;
 #[macro_use]
 extern crate clap;
 
-extern crate humantime;
-extern crate racer;
+use humantime;
+use racer;
 
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use racer::{BytePos, Coordinate, FileCache, Match, MatchType, Session};
@@ -16,7 +16,7 @@ use std::time::SystemTime;
 
 fn point(cfg: &Config) {
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, None);
     cfg.interface.emit(Message::Coords(cfg.coords()));
     if let Some(point) = racer::to_point(cfg.coords(), cfg.expect_file(), &session) {
         cfg.interface.emit(Message::Point(point));
@@ -26,7 +26,7 @@ fn point(cfg: &Config) {
 
 fn coord(cfg: &Config) {
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, None);
     cfg.interface.emit(Message::Point(cfg.point));
     if let Some(coords) = racer::to_coords(cfg.point, cfg.expect_file(), &session) {
         cfg.interface.emit(Message::Coords(coords));
@@ -34,7 +34,7 @@ fn coord(cfg: &Config) {
     cfg.interface.emit(Message::End);
 }
 
-fn match_with_snippet_fn(m: Match, session: &Session, interface: Interface) {
+fn match_with_snippet_fn(m: Match, session: &Session<'_>, interface: Interface) {
     let cd = m
         .coords
         .expect("[match_with_snipper_fn] failed to get coordinate");
@@ -124,7 +124,7 @@ where
     Ok(res)
 }
 
-fn load_query_file<P, S>(path: P, sub: S, session: &Session)
+fn load_query_file<P, S>(path: P, sub: S, session: &Session<'_>)
 where
     P: Into<PathBuf>,
     S: AsRef<Path>,
@@ -146,9 +146,9 @@ fn run_the_complete_fn(cfg: &Config, print_type: CompletePrinter) {
     let substitute_file = cfg.substitute_file.as_ref().unwrap_or(fn_path);
 
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, Some(fn_path));
 
-    load_query_file(&fn_path, &substitute_file, &session);
+    load_query_file(fn_path, &substitute_file, &session);
 
     if let Some(expanded) = racer::expand_ident(&fn_path, cfg.coords(), &session) {
         cfg.interface.emit(Message::Prefix(
@@ -170,7 +170,7 @@ fn run_the_complete_fn(cfg: &Config, print_type: CompletePrinter) {
 fn external_complete(cfg: &Config, print_type: CompletePrinter) {
     let cwd = Path::new(".");
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, Some(cwd));
 
     for m in racer::complete_fully_qualified_name(cfg.fqn.as_ref().unwrap(), &cwd, &session) {
         match print_type {
@@ -184,10 +184,10 @@ fn prefix(cfg: &Config) {
     let fn_path = cfg.fn_name.as_ref().unwrap();
     let substitute_file = cfg.substitute_file.as_ref().unwrap_or(fn_path);
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, Some(fn_path));
 
     // Cache query file in session
-    load_query_file(&fn_path, &substitute_file, &session);
+    load_query_file(fn_path, &substitute_file, &session);
 
     // print the start, end, and the identifier prefix being matched
     let expanded = racer::expand_ident(fn_path, cfg.coords(), &session).unwrap();
@@ -202,10 +202,10 @@ fn find_definition(cfg: &Config) {
     let fn_path = cfg.fn_name.as_ref().unwrap();
     let substitute_file = cfg.substitute_file.as_ref().unwrap_or(fn_path);
     let cache = FileCache::default();
-    let session = Session::new(&cache);
+    let session = Session::new(&cache, Some(fn_path));
 
     // Cache query file in session
-    load_query_file(&fn_path, &substitute_file, &session);
+    load_query_file(fn_path, &substitute_file, &session);
 
     if let Some(m) = racer::find_definition(fn_path, cfg.coords(), &session) {
         match_fn(m, cfg.interface);
@@ -289,7 +289,7 @@ impl Interface {
         }
     }
 
-    fn emit(&self, message: Message) {
+    fn emit(&self, message: Message<'_>) {
         match message {
             Message::End => println!("END"),
             Message::Prefix(start, pos, text) => match *self {
@@ -398,7 +398,7 @@ impl Config {
 }
 
 impl<'a> From<&'a ArgMatches<'a>> for Config {
-    fn from(m: &'a ArgMatches) -> Self {
+    fn from(m: &'a ArgMatches<'_>) -> Self {
         // Check for the presence of the `point` argument that indicates we're
         // being asked to convert from point to coordinates
         if m.is_present("point") && m.is_present("path") {
@@ -622,8 +622,8 @@ fn main() {
     run(&matches, interface);
 }
 
-fn run(m: &ArgMatches, interface: Interface) {
-    use CompletePrinter::{Normal, WithSnippets};
+fn run(m: &ArgMatches<'_>, interface: Interface) {
+    use crate::CompletePrinter::{Normal, WithSnippets};
     // match raw subcommand, and get it's sub-matches "m"
     if let (name, Some(sub_m)) = m.subcommand() {
         let mut cfg = Config::from(sub_m);
