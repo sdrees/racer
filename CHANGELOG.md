@@ -4,6 +4,44 @@ Change Log
 All notable changes to this project will be documented in this file. This
 project adheres to [Semantic Versioning](http://semver.org/).
 
+# 2.1.37
+- Bump rustc-ap-* version to 677.0
+- Account for new standard library source directory layout
+
+# 2.1.37
+- Bump rustc-ap-* version to 671.0
+
+# 2.1.36
+- Bump rustc-ap-* version to 669.0
+
+# 2.1.35
+- Bump rustc-ap-* version to 664.0
+
+# 2.1.34
+- Bump rustc-ap-* version to 659.0
+- Fix submodule search (#1107)
+
+# 2.1.33
+- Bump rustc-ap-* version to 654.0
+
+# 2.1.32
+- Bump rustc-ap-* version to 651.0
+
+# 2.1.31
+- Bump rustc-ap-* version to 642.0
+
+# 2.1.30
+- Support for union(#1086)
+
+# 2.1.29
+- Support async/await syntax(#1083, #1085)
+
+# 2.1.28
+- Update the version of rustc-ap-syntax
+
+# 2.1.27
+- Update the version of rustc-ap-syntax
+
 # 2.1.26
 - Update the version of rustc-ap-syntax
 

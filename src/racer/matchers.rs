@@ -352,55 +352,100 @@ pub fn match_mod(
         });
     } else {
         debug!("found a module declaration: |{}|", blob);
-
+        // the name of the file where we found the module declaration (foo.rs)
+        // without its extension!
+        let filename = context.filepath.file_stem()?;
         let parent_path = context.filepath.parent()?;
-        let ranged_raw = session.load_raw_src_ranged(&msrc, context.filepath);
-        // get module from path attribute
-        if let Some(modpath) =
-            scopes::get_module_file_from_path(msrc, context.range.start, parent_path, ranged_raw)
-        {
-            let doc_src = session.load_raw_file(&modpath);
-            return Some(Match {
-                matchstr: s,
-                filepath: modpath.to_path_buf(),
-                point: BytePos::ZERO,
-                coords: Some(Coordinate::start()),
-                local: false,
-                mtype: Module,
-                contextstr: modpath.to_str().unwrap().to_owned(),
-                docs: find_mod_doc(&doc_src, BytePos::ZERO),
-            });
-        }
-        // get internal module nesting
-        // e.g. is this in an inline submodule?  mod foo{ mod bar; }
-        // because if it is then we need to search further down the
-        // directory hierarchy - e.g. <cwd>/foo/bar.rs
-        let internalpath = scopes::get_local_module_path(msrc, context.range.start);
-        let mut searchdir = parent_path.to_owned();
-        for s in internalpath {
-            searchdir.push(&s);
-        }
-        if let Some(modpath) = get_module_file(&s, &searchdir, session) {
-            let doc_src = session.load_raw_file(&modpath);
-            let context = modpath.to_str().unwrap().to_owned();
-            return Some(Match {
-                matchstr: s,
-                filepath: modpath,
-                point: BytePos::ZERO,
-                coords: Some(Coordinate::start()),
-                local: false,
-                mtype: Module,
-                contextstr: context,
-                docs: find_mod_doc(&doc_src, BytePos::ZERO),
-            });
-        }
+        // if we found the declaration in `src/foo.rs`, then let's look for the
+        // submodule in `src/foo/` as well!
+        let filename_subdir = parent_path.join(filename);
+        // if we are looking for "foo::bar", we have two cases:
+        //   1. we found `pub mod bar;` in either `src/foo/mod.rs`
+        // (or `src/lib.rs`). As such we are going to search for `bar.rs` in
+        // the same directory (`src/foo/`, or `src/` respectively).
+        //   2. we found `pub mod bar;` in `src/foo.rs`. This means that we also
+        // need to seach in `src/foo/` if it exists!
+        let search_path = if filename_subdir.exists() {
+            filename_subdir.as_path()
+        } else {
+            parent_path
+        };
+        match_mod_inner(msrc, context, session, search_path, s)
+    }
+}
+
+fn match_mod_inner(
+    msrc: Src<'_>,
+    context: &MatchCxt<'_, '_>,
+    session: &Session<'_>,
+    search_path: &Path,
+    s: String,
+) -> Option<Match> {
+    let ranged_raw = session.load_raw_src_ranged(&msrc, context.filepath);
+    // get module from path attribute
+    if let Some(modpath) =
+        scopes::get_module_file_from_path(msrc, context.range.start, search_path, ranged_raw)
+    {
+        let doc_src = session.load_raw_file(&modpath);
+        return Some(Match {
+            matchstr: s,
+            filepath: modpath.to_path_buf(),
+            point: BytePos::ZERO,
+            coords: Some(Coordinate::start()),
+            local: false,
+            mtype: Module,
+            contextstr: modpath.to_str().unwrap().to_owned(),
+            docs: find_mod_doc(&doc_src, BytePos::ZERO),
+        });
+    }
+    // get internal module nesting
+    // e.g. is this in an inline submodule?  mod foo{ mod bar; }
+    // because if it is then we need to search further down the
+    // directory hierarchy - e.g. <cwd>/foo/bar.rs
+    let internalpath = scopes::get_local_module_path(msrc, context.range.start);
+    let mut searchdir = (*search_path).to_owned();
+    for s in internalpath {
+        searchdir.push(&s);
+    }
+    if let Some(modpath) = get_module_file(&s, &searchdir, session) {
+        let doc_src = session.load_raw_file(&modpath);
+        let context = modpath.to_str().unwrap().to_owned();
+        return Some(Match {
+            matchstr: s,
+            filepath: modpath,
+            point: BytePos::ZERO,
+            coords: Some(Coordinate::start()),
+            local: false,
+            mtype: Module,
+            contextstr: context,
+            docs: find_mod_doc(&doc_src, BytePos::ZERO),
+        });
     }
     None
 }
 
 fn find_generics_end(blob: &str) -> Option<BytePos> {
+    // Naive version that attempts to skip over attributes
+    let mut in_attr = false;
+    let mut attr_level = 0;
+
     let mut level = 0;
     for (i, b) in blob.as_bytes().into_iter().enumerate() {
+        // Naively skip attributes `#[...]`
+        if in_attr {
+            match b {
+                b'[' => attr_level += 1,
+                b']' => {
+                    attr_level -=1;
+                    if attr_level == 0 {
+                        in_attr = false;
+                        continue;
+                    }
+                },
+                _ => continue,
+            }
+        }
+        // ...otherwise just try to find the last `>`
         match b {
             b'{' | b'(' | b';' => return None,
             b'<' => level += 1,
@@ -410,6 +455,7 @@ fn find_generics_end(blob: &str) -> Option<BytePos> {
                     return Some(i.into());
                 }
             }
+            b'#' if blob.bytes().nth(i + 1) == Some(b'[') => in_attr = true,
             _ => {}
         }
     }
@@ -439,6 +485,34 @@ pub fn match_struct(
         coords: None,
         local: context.is_local,
         mtype: Struct(Box::new(generics)),
+        contextstr: get_context(blob, "{"),
+        docs: find_doc(&doc_src, start),
+    })
+}
+
+pub fn match_union(
+    msrc: Src<'_>,
+    context: &MatchCxt<'_, '_>,
+    session: &Session<'_>,
+) -> Option<Match> {
+    let blob = &msrc[context.range.to_range()];
+    let (start, s) = context.get_key_ident(blob, "union", &[])?;
+
+    debug!("found a union |{}|", s);
+    let generics =
+        find_generics_end(&blob[start.0..]).map_or_else(Default::default, |generics_end| {
+            let header = format!("union {}();", &blob[start.0..=(start + generics_end).0]);
+            ast::parse_generics(header, context.filepath)
+        });
+    let start = context.range.start + start;
+    let doc_src = session.load_raw_src_ranged(&msrc, context.filepath);
+    Some(Match {
+        matchstr: s,
+        filepath: context.filepath.to_path_buf(),
+        point: start,
+        coords: None,
+        local: context.is_local,
+        mtype: MatchType::Union(Box::new(generics)),
         contextstr: get_context(blob, "{"),
         docs: find_doc(&doc_src, start),
     })
@@ -723,7 +797,7 @@ fn match_fn_common(
     context: &MatchCxt<'_, '_>,
     session: &Session<'_>,
 ) -> Option<Match> {
-    let (start, s) = context.get_key_ident(blob, "fn", &["const", "unsafe"])?;
+    let (start, s) = context.get_key_ident(blob, "fn", &["const", "unsafe", "async"])?;
     let start = context.range.start + start;
     let doc_src = session.load_raw_src_ranged(&msrc, context.filepath);
     Some(Match {
@@ -816,4 +890,25 @@ pub fn match_impl(decl: String, context: &MatchCxt<'_, '_>, offset: BytePos) -> 
         out.push(type_param.into_match());
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn find_generics_end() {
+        use super::find_generics_end;
+        assert_eq!(
+            find_generics_end("Vec<T, #[unstable(feature = \"\", issue = \"\"] A: AllocRef = Global>"),
+            Some(BytePos(64))
+        );
+        assert_eq!(
+            find_generics_end("Vec<T, A: AllocRef = Global>"),
+            Some(BytePos(27))
+        );
+        assert_eq!(
+            find_generics_end("Result<Vec<String>, Option<&str>>"),
+            Some(BytePos(32))
+        );
+    }
 }

@@ -9,16 +9,16 @@ use crate::primitive;
 use crate::primitive::PrimKind;
 use crate::typeinf;
 use crate::util;
-use std::fmt;
-use std::path::{Path as FilePath, PathBuf};
-use syntax::ast::{
+use rustc_ast::ast::{
     self, GenericBound, GenericBounds, GenericParamKind, LitKind, PatKind, TraitRef, TyKind,
     WherePredicate,
 };
+use rustc_ast_pretty::pprust;
+use rustc_span::source_map;
+use std::fmt;
+use std::path::{Path as FilePath, PathBuf};
 // we can only re-export types without thread-local interned string
-pub use syntax::ast::{BindingMode, Mutability};
-use syntax::print::pprust;
-use syntax::source_map;
+pub use rustc_ast::ast::{BindingMode, Mutability};
 
 /// The leaf of a `use` statement.
 #[derive(Clone, Debug)]
@@ -58,6 +58,9 @@ pub enum Ty {
     Ptr(Box<Ty>, Mutability),
     TraitObject(TraitBounds),
     Self_(Scope),
+    Future(Box<Ty>, Scope),
+    Never,
+    Default,
     Unsupported,
 }
 
@@ -99,7 +102,7 @@ impl Ty {
         let mut ty = self;
         // TODO: it's incorrect
         for _ in 0..count {
-            ty = Ty::RefPtr(Box::new(ty), Mutability::Immutable);
+            ty = Ty::RefPtr(Box::new(ty), Mutability::Not);
         }
         ty
     }
@@ -111,7 +114,7 @@ impl Ty {
         }
     }
     pub(crate) fn from_ast(ty: &ast::Ty, scope: &Scope) -> Option<Ty> {
-        match ty.node {
+        match ty.kind {
             TyKind::Tup(ref items) => Some(Ty::Tuple(
                 items.into_iter().map(|t| Ty::from_ast(t, scope)).collect(),
             )),
@@ -141,7 +144,7 @@ impl Ty {
             }
             TyKind::ImplicitSelf => Some(Ty::Self_(scope.clone())),
             _ => {
-                trace!("unhandled Ty node: {:?}", ty.node);
+                trace!("unhandled Ty node: {:?}", ty.kind);
                 None
             }
         }
@@ -149,18 +152,18 @@ impl Ty {
 
     pub(crate) fn from_lit(lit: &ast::Lit) -> Option<Ty> {
         let make_match = |kind: PrimKind| kind.to_module_match().map(Ty::Match);
-        match lit.node {
+        match lit.kind {
             LitKind::Str(_, _) => make_match(PrimKind::Str),
             LitKind::ByteStr(ref bytes) => make_match(PrimKind::U8)
                 .map(|ty| Ty::Array(Box::new(ty), format!("{}", bytes.len()))),
             LitKind::Byte(_) => make_match(PrimKind::U8),
             LitKind::Char(_) => make_match(PrimKind::Char),
             LitKind::Int(_, int_ty) => make_match(PrimKind::from_litint(int_ty)),
-            LitKind::Float(_, float_ty) => match float_ty {
+            LitKind::Float(_, ast::LitFloatType::Unsuffixed) => make_match(PrimKind::F32),
+            LitKind::Float(_, ast::LitFloatType::Suffixed(float_ty)) => match float_ty {
                 ast::FloatTy::F32 => make_match(PrimKind::F32),
                 ast::FloatTy::F64 => make_match(PrimKind::F64),
             },
-            LitKind::FloatUnsuffixed(_) => make_match(PrimKind::F32),
             LitKind::Bool(_) => make_match(PrimKind::Bool),
             LitKind::Err(_) => None,
         }
@@ -229,12 +232,12 @@ impl fmt::Display for Ty {
                 write!(f, "]")
             }
             Ty::RefPtr(ref ty, mutab) => match mutab {
-                Mutability::Immutable => write!(f, "&{}", ty),
-                Mutability::Mutable => write!(f, "&mut {}", ty),
+                Mutability::Not => write!(f, "&{}", ty),
+                Mutability::Mut => write!(f, "&mut {}", ty),
             },
             Ty::Ptr(ref ty, mutab) => match mutab {
-                Mutability::Immutable => write!(f, "*const {}", ty),
-                Mutability::Mutable => write!(f, "*mut {}", ty),
+                Mutability::Not => write!(f, "*const {}", ty),
+                Mutability::Mut => write!(f, "*mut {}", ty),
             },
             Ty::TraitObject(ref bounds) => {
                 write!(f, "<")?;
@@ -249,6 +252,9 @@ impl fmt::Display for Ty {
                 write!(f, ">")
             }
             Ty::Self_(_) => write!(f, "Self"),
+            Ty::Future(ref ty, _) => write!(f, "impl Future<Output={}>", ty),
+            Ty::Never => write!(f, "!"),
+            Ty::Default => write!(f, "()"),
             Ty::Unsupported => write!(f, "_"),
         }
     }
@@ -313,7 +319,7 @@ impl Pat {
                 let path = Path::from_ast(path, scope);
                 let pats = pats
                     .iter()
-                    .map(|pat| Pat::from_ast(&pat.node, scope))
+                    .map(|pat| Pat::from_ast(&pat.kind, scope))
                     .collect();
                 Pat::TupleStruct(path, pats)
             }
@@ -321,18 +327,18 @@ impl Pat {
             PatKind::Tuple(pats) => {
                 let pats = pats
                     .iter()
-                    .map(|pat| Pat::from_ast(&pat.node, scope))
+                    .map(|pat| Pat::from_ast(&pat.kind, scope))
                     .collect();
                 Pat::Tuple(pats)
             }
             PatKind::Box(_) => Pat::Box,
-            PatKind::Ref(pat, mut_) => Pat::Ref(Box::new(Pat::from_ast(&pat.node, scope)), *mut_),
+            PatKind::Ref(pat, mut_) => Pat::Ref(Box::new(Pat::from_ast(&pat.kind, scope)), *mut_),
             PatKind::Lit(_) => Pat::Lit,
             PatKind::Range(..) => Pat::Range,
             PatKind::Slice(..) => Pat::Slice,
             // ignore paren
-            PatKind::Paren(pat) => Pat::from_ast(&pat.node, scope),
-            PatKind::Mac(_) => Pat::Mac,
+            PatKind::Paren(pat) => Pat::from_ast(&pat.kind, scope),
+            PatKind::MacCall(_) => Pat::Mac,
             PatKind::Rest => Pat::Rest,
             PatKind::Or(_) => Pat::Or,
         }
@@ -349,7 +355,7 @@ impl FieldPat {
     pub fn from_ast(fpat: &ast::FieldPat, scope: &Scope) -> Self {
         FieldPat {
             field_name: fpat.ident.to_string(),
-            pat: Box::new(Pat::from_ast(&fpat.pat.node, scope)),
+            pat: Box::new(Pat::from_ast(&fpat.pat.kind, scope)),
         }
     }
 }
@@ -434,7 +440,7 @@ impl Path {
             if let Some(ref params) = seg.args {
                 if let ast::GenericArgs::AngleBracketed(ref angle_args) = **params {
                     angle_args.args.iter().for_each(|arg| {
-                        if let ast::GenericArg::Type(ty) = arg {
+                        if let ast::AngleBracketedArg::Arg(ast::GenericArg::Type(ty)) = arg {
                             if let Some(ty) = Ty::from_ast(ty, scope) {
                                 types.push(ty);
                             }
@@ -443,7 +449,7 @@ impl Path {
                 }
                 // TODO: support inputs in GenericArgs::Parenthesized (A path like `Foo(A,B) -> C`)
                 if let ast::GenericArgs::Parenthesized(ref paren_args) = **params {
-                    if let Some(ref ty) = paren_args.output {
+                    if let ast::FnRetTy::Ty(ref ty) = paren_args.output {
                         output = Ty::from_ast(&*ty, scope);
                     }
                 }
@@ -853,15 +859,15 @@ impl GenericsArgs {
                     }
                 }
                 // TODO: Support const
-                GenericParamKind::Const { ty: _ } => {}
+                GenericParamKind::Const { ty: _, .. } => {}
             }
         }
         for pred in generics.where_clause.predicates.iter() {
             match pred {
-                WherePredicate::BoundPredicate(bound) => match bound.bounded_ty.node {
+                WherePredicate::BoundPredicate(bound) => match bound.bounded_ty.kind {
                     TyKind::Path(ref _qself, ref path) => {
                         if let Some(seg) = path.segments.get(0) {
-                            let name = seg.ident.name.as_str();
+                            let name = pprust::path_segment_to_string(&seg);
                             let bound =
                                 TraitBounds::from_generic_bounds(&bound.bounds, &filepath, offset);
                             if let Some(tp) = args.iter_mut().find(|tp| tp.name == name) {
@@ -993,7 +999,7 @@ impl ImplHeader {
     ) -> Option<Self> {
         let generics = GenericsArgs::from_generics(generics, path, offset.0 as i32);
         let scope = Scope::new(path.to_owned(), impl_start);
-        let self_path = get_self_path(&self_type.node, &scope)?;
+        let self_path = get_self_path(&self_type.kind, &scope)?;
         let trait_path = otrait
             .as_ref()
             .map(|tref| Path::from_ast(&tref.path, &scope));
@@ -1053,7 +1059,7 @@ impl ImplHeader {
 
 pub(crate) fn get_self_path(ty: &TyKind, scope: &Scope) -> Option<Path> {
     match ty {
-        TyKind::Rptr(_, ref ty) => get_self_path(&ty.ty.node, scope),
+        TyKind::Rptr(_, ref ty) => get_self_path(&ty.ty.kind, scope),
         TyKind::Path(_, ref path) => Some(Path::from_ast(path, &scope)),
         // HACK: treat slice as path
         TyKind::Slice(_) => Some(Path::single("[T]".to_owned().into())),

@@ -11,8 +11,8 @@ use crate::nameres;
 use crate::primitive::PrimKind;
 use crate::scopes;
 use crate::util::{self, txt_matches};
+use rustc_ast::ast::BinOpKind;
 use std::path::Path;
-use syntax::ast::BinOpKind;
 
 // Removes the body of the statement (anything in the braces {...}), leaving just
 // the header
@@ -444,6 +444,7 @@ pub fn get_type_of_match(m: Match, msrc: Src<'_>, session: &Session<'_>) -> Opti
         core::MatchType::FnArg(_) => get_type_of_fnarg(m, session),
         core::MatchType::MatchArm => get_type_from_match_arm(&m, msrc, session),
         core::MatchType::Struct(_)
+        | core::MatchType::Union(_)
         | core::MatchType::Enum(_)
         | core::MatchType::Function
         | core::MatchType::Method(_)
@@ -520,32 +521,38 @@ pub fn get_return_type_of_function(
 ) -> Option<Ty> {
     let src = session.load_source_file(&fnmatch.filepath);
     let point = scopes::expect_stmt_start(src.as_src(), fnmatch.point);
-    let out = src[point.0..].find('{').and_then(|n| {
-        // wrap in "impl b { }" so that methods get parsed correctly too
-        let decl = "impl b{".to_string() + &src[point.0..point.0 + n + 1] + "}}";
-        debug!("get_return_type_of_function: passing in |{}|", decl);
-        let mut scope = Scope::from_match(fnmatch);
-        // TODO(kngwyu): if point <= 5 scope is incorrect
-        scope.point = point.checked_sub("impl b{".len()).unwrap_or(BytePos::ZERO);
-        ast::parse_fn_output(decl, scope)
-    });
-    // Convert output arg of type Self to the correct type
-    if let Some(Ty::PathSearch(ref paths)) = out {
-        let path = &paths.path;
-        if let Some(ref path_seg) = path.segments.get(0) {
-            if "Self" == path_seg.name {
-                return get_type_of_self_arg(fnmatch, src.as_src(), session);
-            }
-            if path.segments.len() == 1 && path_seg.generics.is_empty() {
-                for type_param in fnmatch.generics() {
-                    if type_param.name() == &path_seg.name {
-                        return Some(Ty::Match(contextm.clone()));
+    let block_start = src[point.0..].find('{')?;
+    let decl = "impl b{".to_string() + &src[point.0..point.0 + block_start + 1] + "}}";
+    debug!("get_return_type_of_function: passing in |{}|", decl);
+    let mut scope = Scope::from_match(fnmatch);
+    // TODO(kngwyu): if point <= 5 scope is incorrect
+    scope.point = point.checked_sub("impl b{".len()).unwrap_or(BytePos::ZERO);
+    let (ty, is_async) = ast::parse_fn_output(decl, scope);
+    let resolve_ty = |ty| {
+        if let Some(Ty::PathSearch(ref paths)) = ty {
+            let path = &paths.path;
+            if let Some(ref path_seg) = path.segments.get(0) {
+                if "Self" == path_seg.name {
+                    return get_type_of_self_arg(fnmatch, src.as_src(), session);
+                }
+                if path.segments.len() == 1 && path_seg.generics.is_empty() {
+                    for type_param in fnmatch.generics() {
+                        if type_param.name() == &path_seg.name {
+                            return Some(Ty::Match(contextm.clone()));
+                        }
                     }
                 }
             }
         }
-    }
-    out
+        ty
+    };
+    resolve_ty(ty).map(|ty| {
+        if is_async {
+            Ty::Future(Box::new(ty), Scope::from_match(fnmatch))
+        } else {
+            ty
+        }
+    })
 }
 
 pub(crate) fn get_type_of_indexed_value(body: Ty, session: &Session<'_>) -> Option<Ty> {

@@ -9,18 +9,25 @@ use crate::typeinf;
 use std::path::Path;
 use std::rc::Rc;
 
-use syntax::ast::{self, ExprKind, FunctionRetTy, ItemKind, PatKind, UseTree, UseTreeKind};
-use syntax::edition::Edition;
-use syntax::errors::{emitter::Emitter, DiagnosticBuilder, Handler};
-use syntax::parse::parser::Parser;
-use syntax::parse::{self, ParseSess};
-use syntax::source_map::{self, FileName, SourceMap, Span};
-use syntax::{self, visit};
+use rustc_ast::ast::{self, ExprKind, FnRetTy, ItemKind, PatKind, UseTree, UseTreeKind};
+use rustc_ast::{self, visit};
+use rustc_data_structures::sync::Lrc;
+use rustc_errors::emitter::Emitter;
+use rustc_errors::{Diagnostic, Handler};
+use rustc_parse::new_parser_from_source_str;
+use rustc_parse::parser::Parser;
+use rustc_session::parse::ParseSess;
+use rustc_span::edition::Edition;
+use rustc_span::source_map::{self, FileName, SourceMap};
+use rustc_span::Span;
 
 struct DummyEmitter;
 
 impl Emitter for DummyEmitter {
-    fn emit_diagnostic(&mut self, _db: &DiagnosticBuilder<'_>) {}
+    fn emit_diagnostic(&mut self, _db: &Diagnostic) {}
+    fn source_map(&self) -> Option<&Lrc<SourceMap>> {
+        None
+    }
     fn should_show_explain(&self) -> bool {
         false
     }
@@ -29,7 +36,7 @@ impl Emitter for DummyEmitter {
 /// construct parser from string
 // From syntax/util/parser_testing.rs
 pub fn string_to_parser(ps: &ParseSess, source_str: String) -> Parser<'_> {
-    parse::new_parser_from_source_str(ps, FileName::Custom("racer-file".to_owned()), source_str)
+    new_parser_from_source_str(ps, FileName::Custom("racer-file".to_owned()), source_str)
 }
 
 /// Get parser from string s and then apply closure f to it
@@ -39,7 +46,7 @@ where
     F: FnOnce(&mut Parser<'_>) -> Option<T>,
 {
     // FIXME: Set correct edition based on the edition of the target crate.
-    syntax::with_globals(Edition::Edition2018, || {
+    rustc_span::with_session_globals(Edition::Edition2018, || {
         let codemap = Rc::new(SourceMap::new(source_map::FilePathMapping::empty()));
         // We use DummyEmitter here not to print error messages to stderr
         let handler = Handler::with_emitter(false, None, Box::new(DummyEmitter {}));
@@ -147,7 +154,7 @@ impl<'ast> visit::Visitor<'ast> for UseVisitor {
             }
             (res, contains_glob)
         }
-        if let ItemKind::Use(ref use_tree) = i.node {
+        if let ItemKind::Use(ref use_tree) = i.kind {
             let (path_list, contains_glob) = collect_nested_items(use_tree, None);
             self.path_list = path_list;
             self.contains_glob = contains_glob;
@@ -167,10 +174,10 @@ impl<'ast> visit::Visitor<'ast> for PatBindVisitor {
 
     fn visit_expr(&mut self, ex: &ast::Expr) {
         // don't visit the RHS or block of an 'if let' or 'for' stmt
-        match &ex.node {
+        match &ex.kind {
             ExprKind::If(let_stmt, ..) | ExprKind::While(let_stmt, ..) => {
-                if let ExprKind::Let(pats, ..) = &let_stmt.node {
-                    pats.iter().for_each(|pat| self.visit_pat(pat))
+                if let ExprKind::Let(pat, ..) = &let_stmt.kind {
+                    self.visit_pat(pat);
                 }
             }
             ExprKind::ForLoop(pat, ..) => self.visit_pat(pat),
@@ -179,7 +186,7 @@ impl<'ast> visit::Visitor<'ast> for PatBindVisitor {
     }
 
     fn visit_pat(&mut self, p: &ast::Pat) {
-        match p.node {
+        match p.kind {
             PatKind::Ident(_, ref spannedident, _) => {
                 self.ident_points.push(spannedident.span.into());
             }
@@ -196,7 +203,7 @@ pub struct PatVisitor {
 
 impl<'ast> visit::Visitor<'ast> for PatVisitor {
     fn visit_pat(&mut self, p: &ast::Pat) {
-        match p.node {
+        match p.kind {
             PatKind::Ident(_, ref spannedident, _) => {
                 self.ident_points.push(spannedident.span.into());
             }
@@ -215,20 +222,18 @@ pub struct FnArgVisitor {
 }
 
 impl<'ast> visit::Visitor<'ast> for FnArgVisitor {
-    fn visit_fn(
-        &mut self,
-        _fk: visit::FnKind<'_>,
-        fd: &ast::FnDecl,
-        _: source_map::Span,
-        _: ast::NodeId,
-    ) {
+    fn visit_fn(&mut self, fk: visit::FnKind<'_>, _: source_map::Span, _: ast::NodeId) {
+        let fd = match fk {
+            visit::FnKind::Fn(_, _, ref fn_sig, _, _) => &*fn_sig.decl,
+            visit::FnKind::Closure(ref fn_decl, _) => fn_decl,
+        };
         debug!("[FnArgVisitor::visit_fn] inputs: {:?}", fd.inputs);
         self.idents = fd
             .inputs
             .iter()
             .map(|arg| {
                 debug!("[FnArgTypeVisitor::visit_fn] type {:?} was found", arg.ty);
-                let pat = Pat::from_ast(&arg.pat.node, &self.scope);
+                let pat = Pat::from_ast(&arg.pat.kind, &self.scope);
                 let ty = Ty::from_ast(&arg.ty, &self.scope);
                 let source_map::BytePos(lo) = arg.pat.span.lo();
                 let source_map::BytePos(hi) = arg.ty.span.hi();
@@ -258,9 +263,9 @@ fn destructure_pattern_to_ty(
 ) -> Option<Ty> {
     debug!(
         "destructure_pattern_to_ty point {:?} ty {:?} pat: {:?}",
-        point, ty, pat.node
+        point, ty, pat.kind
     );
-    match pat.node {
+    match pat.kind {
         PatKind::Ident(_, ref spannedident, _) => {
             if point_is_in_span(point, &spannedident.span) {
                 debug!("destructure_pattern_to_ty matched an ident!");
@@ -314,21 +319,21 @@ fn destructure_pattern_to_ty(
             let contextty = path_to_match(ty.clone(), session);
             for child in children {
                 if point_is_in_span(point, &child.span) {
-                    return typeinf::get_struct_field_type(
-                        &child.ident.name.as_str(),
-                        &m,
-                        session,
-                    )
-                    .and_then(|ty| {
-                        if let Some(Ty::Match(ref contextm)) = contextty {
-                            path_to_match_including_generics(ty, contextm.to_generics(), session)
-                        } else {
-                            path_to_match(ty, session)
-                        }
-                    })
-                    .and_then(|ty| {
-                        destructure_pattern_to_ty(&child.pat, point, &ty, scope, session)
-                    });
+                    return typeinf::get_struct_field_type(&child.ident.name.as_str(), &m, session)
+                        .and_then(|ty| {
+                            if let Some(Ty::Match(ref contextm)) = contextty {
+                                path_to_match_including_generics(
+                                    ty,
+                                    contextm.to_generics(),
+                                    session,
+                                )
+                            } else {
+                                path_to_match(ty, session)
+                            }
+                        })
+                        .and_then(|ty| {
+                            destructure_pattern_to_ty(&child.pat, point, &ty, scope, session)
+                        });
                 }
             }
             None
@@ -352,7 +357,7 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for LetTypeVisitor<'c, 's> {
         let ty = match &local.ty {
             Some(annon) => Ty::from_ast(&*annon, &self.scope),
             None => local.init.as_ref().and_then(|initexpr| {
-                debug!("[LetTypeVisitor] initexpr is {:?}", initexpr.node);
+                debug!("[LetTypeVisitor] initexpr is {:?}", initexpr.kind);
                 let mut v = ExprTypeVisitor::new(self.scope.clone(), self.session);
                 v.visit_expr(initexpr);
                 v.result
@@ -376,7 +381,7 @@ struct MatchTypeVisitor<'c, 's> {
 
 impl<'c, 's, 'ast> visit::Visitor<'ast> for MatchTypeVisitor<'c, 's> {
     fn visit_expr(&mut self, ex: &ast::Expr) {
-        if let ExprKind::Match(ref subexpression, ref arms) = ex.node {
+        if let ExprKind::Match(ref subexpression, ref arms) = ex.kind {
             debug!("PHIL sub expr is {:?}", subexpression);
 
             let mut v = ExprTypeVisitor::new(self.scope.clone(), self.session);
@@ -385,24 +390,17 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for MatchTypeVisitor<'c, 's> {
             debug!("PHIL sub type is {:?}", v.result);
 
             for arm in arms {
-                for pattern in &arm.pats {
-                    if point_is_in_span(self.pos, &pattern.span) {
-                        debug!("PHIL point is in pattern |{:?}|", pattern);
-                        self.result = v
-                            .result
-                            .as_ref()
-                            .and_then(|ty| {
-                                destructure_pattern_to_ty(
-                                    pattern,
-                                    self.pos,
-                                    ty,
-                                    &self.scope,
-                                    self.session,
-                                )
-                            })
-                            .and_then(|ty| path_to_match(ty, self.session));
-                    }
+                if !point_is_in_span(self.pos, &arm.pat.span) {
+                    continue;
                 }
+                debug!("PHIL point is in pattern |{:?}|", arm.pat);
+                self.result = v
+                    .result
+                    .as_ref()
+                    .and_then(|ty| {
+                        destructure_pattern_to_ty(&arm.pat, self.pos, ty, &self.scope, self.session)
+                    })
+                    .and_then(|ty| path_to_match(ty, self.session));
             }
         }
     }
@@ -416,7 +414,6 @@ fn resolve_ast_path(
 ) -> Option<Match> {
     let scope = Scope::new(filepath.to_owned(), pos);
     let path = RacerPath::from_ast(path, &scope);
-    debug!("resolve_ast_path {:?} {:?}", path, scope);
     nameres::resolve_path_with_primitive(
         &path,
         filepath,
@@ -499,11 +496,11 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
     fn visit_expr(&mut self, expr: &ast::Expr) {
         debug!(
             "ExprTypeVisitor::visit_expr {:?}(kind: {:?})",
-            expr, expr.node
+            expr, expr.kind
         );
         //walk_expr(self, ex, e)
-        match expr.node {
-            ExprKind::Unary(_, ref expr) | ExprKind::AddrOf(_, ref expr) => {
+        match expr.kind {
+            ExprKind::Unary(_, ref expr) | ExprKind::AddrOf(_, _, ref expr) => {
                 self.visit_expr(expr);
             }
             ExprKind::Path(_, ref path) => {
@@ -530,7 +527,17 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
                                     .and_then(|ty| path_to_match(ty, self.session))
                             }
                             MatchType::Method(ref gen) => {
-                                typeinf::get_return_type_of_function(&m, &m, self.session).and_then(
+                                let mut return_ty = typeinf::get_return_type_of_function(&m, &m, self.session);
+                                // Account for already resolved generics if the return type is Self
+                                // (in which case we return bare type as found in the `impl` header)
+                                if let (Some(Ty::Match(ref mut m)), Some(gen)) = (&mut return_ty, gen) {
+                                    for (type_param, arg) in m.generics_mut().zip(gen.args()) {
+                                        if let Some(resolved) = arg.resolved() {
+                                            type_param.resolve(resolved.clone());
+                                        }
+                                    }
+                                }
+                                return_ty.and_then(
                                     |ty| {
                                         path_to_match_including_generics(
                                             ty,
@@ -541,7 +548,9 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
                                 )
                             }
                             // if we find tuple struct / enum variant, try to resolve its generics name
-                            MatchType::Struct(ref mut gen) | MatchType::Enum(ref mut gen) => {
+                            MatchType::Struct(ref mut gen)
+                            | MatchType::Enum(ref mut gen)
+                            | MatchType::Union(ref mut gen) => {
                                 if gen.is_empty() {
                                     return Some(Ty::Match(m));
                                 }
@@ -602,7 +611,7 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
                 )
                 .map(Ty::Match);
             }
-            ExprKind::MethodCall(ref method_def, ref arguments) => {
+            ExprKind::MethodCall(ref method_def, ref arguments, _) => {
                 let methodname = method_def.ident.name.as_str();
                 debug!("method call ast name {}", methodname);
 
@@ -744,7 +753,7 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
                     self.result = Some(Ty::Array(Box::new(Ty::Unsupported), String::new()));
                 }
             }
-            ExprKind::Mac(ref m) => {
+            ExprKind::MacCall(ref m) => {
                 if let Some(name) = m.path.segments.last().map(|seg| seg.ident) {
                     // use some ad-hoc rules
                     if name.as_str() == "vec" {
@@ -793,12 +802,12 @@ impl<'c, 's, 'ast> visit::Visitor<'ast> for ExprTypeVisitor<'c, 's> {
                 );
             }
             _ => {
-                debug!("- Could not match expr node type: {:?}", expr.node);
+                debug!("- Could not match expr node type: {:?}", expr.kind);
             }
         };
     }
     /// Just do nothing if we see a macro, but also prevent the panic! in the default impl.
-    fn visit_mac(&mut self, _mac: &ast::Mac) {}
+    fn visit_mac_call(&mut self, _mac: &ast::MacCall) {}
 }
 
 // gets generics info from the context match
@@ -865,10 +874,7 @@ struct StructVisitor {
 }
 
 impl<'ast> visit::Visitor<'ast> for StructVisitor {
-    fn visit_variant_data(
-        &mut self,
-        struct_definition: &ast::VariantData,
-    ) {
+    fn visit_variant_data(&mut self, struct_definition: &ast::VariantData) {
         for field in struct_definition.fields() {
             let ty = Ty::from_ast(&field.ty, &self.scope);
             let name = match field.ident {
@@ -890,7 +896,7 @@ pub struct TypeVisitor<'s> {
 
 impl<'ast, 's> visit::Visitor<'ast> for TypeVisitor<'s> {
     fn visit_item(&mut self, item: &ast::Item) {
-        if let ItemKind::TyAlias(ref ty, _) = item.node {
+        if let ItemKind::TyAlias(_, _, _, Some(ref ty)) = item.kind {
             self.name = Some(item.ident.name.to_string());
             self.type_ = Ty::from_ast(&ty, self.scope);
             debug!("typevisitor type is {:?}", self.type_);
@@ -904,7 +910,7 @@ pub struct TraitVisitor {
 
 impl<'ast> visit::Visitor<'ast> for TraitVisitor {
     fn visit_item(&mut self, item: &ast::Item) {
-        if let ItemKind::Trait(..) = item.node {
+        if let ItemKind::Trait(..) = item.kind {
             self.name = Some(item.ident.name.to_string());
         }
     }
@@ -933,13 +939,19 @@ impl<'p> ImplVisitor<'p> {
 
 impl<'ast, 'p> visit::Visitor<'ast> for ImplVisitor<'p> {
     fn visit_item(&mut self, item: &ast::Item) {
-        if let ItemKind::Impl(_, _, _, ref generics, ref otrait, ref self_typ, _) = item.node {
+        if let ItemKind::Impl {
+            ref generics,
+            ref of_trait,
+            ref self_ty,
+            ..
+        } = item.kind
+        {
             let impl_start = self.offset + get_span_start(item.span).into();
             self.result = ImplHeader::new(
                 generics,
                 self.filepath,
-                otrait,
-                self_typ,
+                of_trait,
+                self_ty,
                 self.offset,
                 self.local,
                 impl_start,
@@ -956,14 +968,14 @@ pub struct ExternCrateVisitor {
 
 impl<'ast> visit::Visitor<'ast> for ExternCrateVisitor {
     fn visit_item(&mut self, item: &ast::Item) {
-        if let ItemKind::ExternCrate(ref optional_s) = item.node {
+        if let ItemKind::ExternCrate(ref optional_s) = item.kind {
             self.name = Some(item.ident.name.to_string());
             if let Some(ref istr) = *optional_s {
                 self.realname = Some(istr.to_string());
             }
         }
     }
-    fn visit_mac(&mut self, _mac: &ast::Mac) {}
+    fn visit_mac_call(&mut self, _mac: &ast::MacCall) {}
 }
 
 #[derive(Debug)]
@@ -989,15 +1001,14 @@ pub struct EnumVisitor {
 
 impl<'ast> visit::Visitor<'ast> for EnumVisitor {
     fn visit_item(&mut self, i: &ast::Item) {
-        if let ItemKind::Enum(ref enum_definition, _) = i.node {
+        if let ItemKind::Enum(ref enum_definition, _) = i.kind {
             self.name = i.ident.name.to_string();
             let (point1, point2) = destruct_span(i.span);
             debug!("name point is {} {}", point1, point2);
 
             for variant in &enum_definition.variants {
                 let source_map::BytePos(point) = variant.span.lo();
-                self.values
-                    .push((variant.ident.to_string(), point.into()));
+                self.values.push((variant.ident.to_string(), point.into()));
             }
         }
     }
@@ -1022,10 +1033,10 @@ impl StaticVisitor {
 
 impl<'ast> visit::Visitor<'ast> for StaticVisitor {
     fn visit_item(&mut self, i: &ast::Item) {
-        match i.node {
-            ItemKind::Const(ref ty, ref _expr) => self.ty = Ty::from_ast(ty, &self.scope),
+        match i.kind {
+            ItemKind::Const(_, ref ty, ref _expr) => self.ty = Ty::from_ast(ty, &self.scope),
             ItemKind::Static(ref ty, m, ref _expr) => {
-                self.is_mutable = m == ast::Mutability::Mutable;
+                self.is_mutable = m == ast::Mutability::Mut;
                 self.ty = Ty::from_ast(ty, &self.scope);
             }
             _ => {}
@@ -1148,13 +1159,11 @@ pub fn parse_pat_idents(s: String) -> Vec<ByteRange> {
     v.ident_points
 }
 
-pub fn parse_fn_output(s: String, scope: Scope) -> Option<Ty> {
-    let mut v = FnOutputVisitor {
-        result: None,
-        scope,
-    };
+pub fn parse_fn_output(s: String, scope: Scope) -> (Option<Ty>, bool) {
+    let mut v = FnOutputVisitor::new(scope);
     with_stmt(s, |stmt| visit::walk_stmt(&mut v, stmt));
-    v.result
+    let FnOutputVisitor { ty, is_async, .. } = v;
+    (ty, is_async)
 }
 
 pub fn parse_extern_crate(s: String) -> ExternCrateVisitor {
@@ -1223,20 +1232,33 @@ pub fn get_match_arm_type(
 
 pub struct FnOutputVisitor {
     scope: Scope,
-    pub result: Option<Ty>,
+    pub ty: Option<Ty>,
+    pub is_async: bool,
+}
+
+impl FnOutputVisitor {
+    pub(crate) fn new(scope: Scope) -> Self {
+        FnOutputVisitor {
+            scope,
+            ty: None,
+            is_async: false,
+        }
+    }
 }
 
 impl<'ast> visit::Visitor<'ast> for FnOutputVisitor {
-    fn visit_fn(
-        &mut self,
-        _: visit::FnKind<'_>,
-        fd: &ast::FnDecl,
-        _: source_map::Span,
-        _: ast::NodeId,
-    ) {
-        self.result = match fd.output {
-            FunctionRetTy::Ty(ref ty) => Ty::from_ast(ty, &self.scope),
-            FunctionRetTy::Default(_) => None,
+    fn visit_fn(&mut self, kind: visit::FnKind<'_>, _: source_map::Span, _: ast::NodeId) {
+        let fd = match kind {
+            visit::FnKind::Fn(_, _, ref fn_sig, _, _) => &*fn_sig.decl,
+            visit::FnKind::Closure(ref fn_decl, _) => fn_decl,
+        };
+        self.is_async = kind
+            .header()
+            .map(|header| header.asyncness.is_async())
+            .unwrap_or(false);
+        self.ty = match fd.output {
+            FnRetTy::Ty(ref ty) => Ty::from_ast(ty, &self.scope),
+            FnRetTy::Default(_) => Some(Ty::Default),
         };
     }
 }
@@ -1256,7 +1278,7 @@ where
     P: AsRef<Path>,
 {
     fn visit_item(&mut self, item: &ast::Item) {
-        if let ItemKind::Trait(_, _, _, ref bounds, _) = item.node {
+        if let ItemKind::Trait(_, _, _, ref bounds, _) = item.kind {
             self.result = Some(TraitBounds::from_generic_bounds(
                 bounds,
                 &self.file_path,
@@ -1276,8 +1298,8 @@ pub(crate) struct ForStmtVisitor<'r, 's> {
 
 impl<'ast, 'r, 's> visit::Visitor<'ast> for ForStmtVisitor<'r, 's> {
     fn visit_expr(&mut self, ex: &'ast ast::Expr) {
-        if let ExprKind::ForLoop(ref pat, ref expr, _, _) = ex.node {
-            let for_pat = Pat::from_ast(&pat.node, &self.scope);
+        if let ExprKind::ForLoop(ref pat, ref expr, _, _) = ex.kind {
+            let for_pat = Pat::from_ast(&pat.kind, &self.scope);
             let mut expr_visitor = ExprTypeVisitor::new(self.scope.clone(), self.session);
             expr_visitor.visit_expr(expr);
             self.in_expr = expr_visitor.result;
@@ -1311,16 +1333,13 @@ pub(crate) struct IfLetVisitor<'r, 's> {
 
 impl<'ast, 'r, 's> visit::Visitor<'ast> for IfLetVisitor<'r, 's> {
     fn visit_expr(&mut self, ex: &'ast ast::Expr) {
-        match &ex.node {
+        match &ex.kind {
             ExprKind::If(let_stmt, ..) | ExprKind::While(let_stmt, ..) => {
-                if let ExprKind::Let(pats, expr) = &let_stmt.node {
-                    if let Some(pat) = pats.get(0) {
-                        self.let_pat = Some(Pat::from_ast(&pat.node, &self.scope));
-                        let mut expr_visitor =
-                            ExprTypeVisitor::new(self.scope.clone(), self.session);
-                        expr_visitor.visit_expr(expr);
-                        self.rh_expr = expr_visitor.result;
-                    }
+                if let ExprKind::Let(pat, expr) = &let_stmt.kind {
+                    self.let_pat = Some(Pat::from_ast(&pat.kind, &self.scope));
+                    let mut expr_visitor = ExprTypeVisitor::new(self.scope.clone(), self.session);
+                    expr_visitor.visit_expr(expr);
+                    self.rh_expr = expr_visitor.result;
                 }
             }
             _ => {}

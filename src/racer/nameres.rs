@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::{self, vec};
 
 use crate::primitive::PrimKind;
-use syntax::ast::BinOpKind;
+use rustc_ast::ast::BinOpKind;
 
 use crate::ast_types::{ImplHeader, Path as RacerPath, PathPrefix, PathSegment, Ty};
 use crate::core::Namespace;
@@ -18,7 +18,7 @@ use crate::matchers::{find_doc, ImportInfo, MatchCxt};
 use crate::primitive;
 use crate::util::{
     self, calculate_str_hash, find_ident_end, get_rust_src_path, strip_words, symbol_matches,
-    trim_visibility, txt_matches,
+    trim_visibility, txt_matches, txt_matches_with_pos,
 };
 use crate::{ast, core, matchers, scopes, typeinf};
 
@@ -33,7 +33,7 @@ pub(crate) fn search_struct_fields(
     session: &Session<'_>,
 ) -> Vec<Match> {
     match structmatch.mtype {
-        MatchType::Struct(_) | MatchType::EnumVariant(_) => {}
+        MatchType::Struct(_) | MatchType::EnumVariant(_) | MatchType::Union(_) => {}
         _ => return Vec::new(),
     }
     let src = session.load_source_file(&structmatch.filepath);
@@ -660,7 +660,7 @@ fn search_scope_headers(
 // TODO: handle extern ".." fn
 fn preblock_is_fn(preblock: &str) -> bool {
     let s = trim_visibility(preblock);
-    let p = strip_words(s, &["const", "unsafe"]);
+    let p = strip_words(s, &["const", "unsafe", "async"]);
     if p.0 < s.len() {
         s[p.0..].starts_with("fn")
     } else {
@@ -672,6 +672,7 @@ fn preblock_is_fn(preblock: &str) -> bool {
 fn is_fn() {
     assert!(preblock_is_fn("pub fn bar()"));
     assert!(preblock_is_fn("fn foo()"));
+    assert!(preblock_is_fn("async fn foo()"));
     assert!(preblock_is_fn("const fn baz()"));
     assert!(preblock_is_fn("pub(crate) fn bar()"));
     assert!(preblock_is_fn("pub(in foo::bar) fn bar()"));
@@ -764,7 +765,7 @@ fn test_do_file_search_std() {
     let matches = do_file_search("std", path, &session);
     assert!(matches
         .into_iter()
-        .any(|m| m.filepath.ends_with("src/libstd/lib.rs")));
+        .any(|m| m.filepath.ends_with("std/src/lib.rs")));
 }
 
 #[test]
@@ -803,6 +804,7 @@ pub fn do_file_search(searchstr: &str, currentdir: &Path, session: &Session<'_>)
                     Some(fname) => fname,
                     None => continue,
                 };
+                // Firstly, try the original layout, e.g. libstd/lib.rs
                 if fname.starts_with(&format!("lib{}", searchstr)) {
                     let filepath = fpath_buf.join("lib.rs");
                     if filepath.exists() || session.contains_file(&filepath) {
@@ -814,6 +816,23 @@ pub fn do_file_search(searchstr: &str, currentdir: &Path, session: &Session<'_>)
                             local: false,
                             mtype: MatchType::Module,
                             contextstr: fname[3..].to_owned(),
+                            docs: String::new(),
+                        };
+                        out.push(m);
+                    }
+                }
+                // Secondly, try the new standard library layout, e.g. std/src/lib.rs
+                if fname.starts_with(searchstr) {
+                    let filepath = fpath_buf.join("src").join("lib.rs");
+                    if filepath.exists() || session.contains_file(&filepath) {
+                        let m = Match {
+                            matchstr: fname.to_owned(),
+                            filepath: filepath.to_path_buf(),
+                            point: BytePos::ZERO,
+                            coords: Some(Coordinate::start()),
+                            local: false,
+                            mtype: MatchType::Module,
+                            contextstr: fname.to_owned(),
                             docs: String::new(),
                         };
                         out.push(m);
@@ -1253,6 +1272,7 @@ fn run_matchers_on_blob(
     run_matcher!(Namespace::Mod, matchers::match_mod);
     run_matcher!(Namespace::Enum, matchers::match_enum);
     run_matcher!(Namespace::Struct, matchers::match_struct);
+    run_matcher!(Namespace::Union, matchers::match_union);
     run_matcher!(Namespace::Trait, matchers::match_trait);
     run_matcher!(Namespace::TypeDef, matchers::match_type);
     run_matcher!(Namespace::Func, matchers::match_fn);
@@ -1361,7 +1381,7 @@ pub fn search_prelude_file(
 
     // find the prelude file from the search path and scan it
     if let Some(ref std_path) = *RUST_SRC_PATH {
-        let filepath = std_path.join("libstd").join("prelude").join("v1.rs");
+        let filepath = std_path.join("std").join("src").join("prelude").join("v1.rs");
         if filepath.exists() || session.contains_file(&filepath) {
             let msrc = session.load_source_file(&filepath);
             let is_local = true;
@@ -1420,7 +1440,6 @@ pub fn resolve_path_with_primitive(
             break;
         }
     }
-
     out
 }
 
@@ -1905,7 +1924,7 @@ fn resolve_following_path(
                 import_info,
             )
         }
-        MatchType::Enum(_) | MatchType::Struct(_) => get_impled_items(
+        MatchType::Enum(_) | MatchType::Struct(_) | MatchType::Union(_) => get_impled_items(
             following_seg,
             search_type,
             &followed_match,
@@ -2195,10 +2214,10 @@ pub fn search_for_fields_and_methods(
     let m = context;
     let mut out = Vec::new();
     match m.mtype {
-        MatchType::Struct(_) => {
+        MatchType::Struct(_) | MatchType::Union(_) => {
             debug!(
-                "got a struct, looking for fields and impl methods!! {}",
-                m.matchstr
+                "got a struct or union, looking for fields and impl methods!! {}",
+                m.matchstr,
             );
             if !only_methods {
                 for m in search_struct_fields(searchstr, &m, search_type, session) {
@@ -2370,8 +2389,26 @@ pub(crate) fn get_field_matches_from_ty(
             .into_iter()
             .flat_map(|ps| get_field_matches_from_ty(Ty::PathSearch(ps), searchstr, stype, session))
             .collect(),
+        Ty::Future(_, scope) => get_future(scope, session)
+            .into_iter()
+            .flat_map(|f| search_for_trait_methods(f, searchstr, stype, session))
+            .chain(
+                txt_matches_with_pos(stype, searchstr, "await")
+                    .and_then(|_| PrimKind::Await.to_doc_match(session))
+                    .into_iter(),
+            )
+            .collect(),
         _ => vec![],
     }
+}
+
+fn get_future(scope: Scope, session: &Session<'_>) -> Option<Match> {
+    let path = RacerPath::from_iter(
+        false,
+        ["std", "future", "Future"].iter().map(|s| s.to_string()),
+    );
+
+    ast::find_type_match(&path, &scope.filepath, scope.point, session)
 }
 
 fn get_assoc_type_from_header(
@@ -2422,18 +2459,19 @@ fn get_std_macros(
         searchstr
     };
     for macro_file in &[
-        "libstd/macros.rs",
-        "libcore/macros.rs",
-        "liballoc/macros.rs",
+        "std/src/macros.rs",
+        "core/src/macros.rs",
+        "core/src/macros/mod.rs",
+        "alloc/src/macros.rs",
     ] {
         let macro_path = std_path.join(macro_file);
         if !macro_path.exists() {
-            return;
+            continue;
         }
         get_std_macros_(
             &macro_path,
             searchstr,
-            macro_file == &"libcore/macros.rs",
+            macro_file == &"core/src/macros.rs",
             search_type,
             session,
             out,
